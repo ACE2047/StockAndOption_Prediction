@@ -23,6 +23,9 @@ except ImportError:
     WS_HOST = os.environ.get("WS_HOST", "localhost")
     WS_PORT = int(os.environ.get("WS_PORT", 8765))
 
+# Import Polygon WebSocket client
+from polygon_websocket_client import PolygonWebSocketClient
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger("websocket_server")
 
 class StockWebSocketServer:
-    """WebSocket server for real-time stock data."""
+    """WebSocket server for real-time stock data using Polygon.io WebSocket API."""
     
     def __init__(self, host: str = WS_HOST, port: int = WS_PORT):
         """Initialize the WebSocket server.
@@ -46,7 +49,64 @@ class StockWebSocketServer:
         self.stock_data: Dict[str, Dict[str, Any]] = {}
         self.running = False
         self.server = None
-        self.update_thread = None
+        
+        # Initialize Polygon WebSocket client
+        self.polygon_client = PolygonWebSocketClient()
+        
+        # Register callback for trade events
+        self.polygon_client.register_callback('T', self.handle_polygon_trade)
+    
+    def handle_polygon_trade(self, trade_data: Dict[str, Any]):
+        """Handle trade data from Polygon WebSocket.
+        
+        Args:
+            trade_data: Trade data from Polygon
+        """
+        try:
+            symbol = trade_data.get('sym')
+            if not symbol:
+                return
+                
+            # Update our stock data cache
+            self.stock_data[symbol] = {
+                "price": trade_data.get('p', 0),
+                "size": trade_data.get('s', 0),
+                "timestamp": trade_data.get('t', 0),
+                "exchange": trade_data.get('x', 0),
+                "conditions": trade_data.get('c', []),
+                "updated_at": datetime.now().isoformat()
+            }
+            
+            # Broadcast to clients asynchronously
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast_symbol_update(symbol), 
+                asyncio.get_event_loop()
+            )
+        except Exception as e:
+            logger.error(f"Error handling Polygon trade data: {e}")
+    
+    async def broadcast_symbol_update(self, symbol: str):
+        """Broadcast symbol update to subscribed clients.
+        
+        Args:
+            symbol: Symbol that was updated
+        """
+        if symbol not in self.stock_data:
+            return
+            
+        data = self.stock_data[symbol]
+        
+        # Broadcast to subscribed clients
+        for websocket, subscriptions in self.clients.items():
+            if symbol in subscriptions:
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "stock_update",
+                        "symbol": symbol,
+                        "data": data
+                    }))
+                except websockets.exceptions.ConnectionClosed:
+                    pass
     
     async def register(self, websocket: websockets.WebSocketServerProtocol):
         """Register a new client connection.
@@ -64,7 +124,24 @@ class StockWebSocketServer:
             websocket: WebSocket connection to unregister
         """
         if websocket in self.clients:
+            # Get the symbols this client was subscribed to
+            symbols = list(self.clients[websocket])
+            
+            # Check if any symbols are no longer needed by any client
+            for symbol in symbols:
+                still_needed = False
+                for other_client, other_subscriptions in self.clients.items():
+                    if other_client != websocket and symbol in other_subscriptions:
+                        still_needed = True
+                        break
+                
+                # If no other clients need this symbol, unsubscribe from Polygon
+                if not still_needed:
+                    self.polygon_client.unsubscribe([symbol])
+            
+            # Remove the client
             del self.clients[websocket]
+            
         logger.info(f"Client disconnected. Total clients: {len(self.clients)}")
     
     async def subscribe(self, websocket: websockets.WebSocketServerProtocol, symbol: str):
@@ -74,16 +151,38 @@ class StockWebSocketServer:
             websocket: WebSocket connection
             symbol: Stock symbol to subscribe to
         """
+        symbol = symbol.upper()
+        
         if websocket in self.clients:
-            self.clients[websocket].add(symbol.upper())
+            # Check if this is a new subscription for this client
+            is_new_subscription = symbol not in self.clients[websocket]
+            
+            # Add to client's subscriptions
+            self.clients[websocket].add(symbol)
+            
+            # If this is a new subscription, subscribe to Polygon
+            if is_new_subscription:
+                self.polygon_client.subscribe([symbol])
+            
             # Send initial data if available
-            if symbol.upper() in self.stock_data:
+            if symbol in self.stock_data:
                 await websocket.send(json.dumps({
                     "type": "stock_update",
-                    "symbol": symbol.upper(),
-                    "data": self.stock_data[symbol.upper()]
+                    "symbol": symbol,
+                    "data": self.stock_data[symbol]
                 }))
-            logger.info(f"Client subscribed to {symbol.upper()}")
+            else:
+                # Fetch initial data if not available
+                data = self.fetch_stock_data(symbol)
+                if data:
+                    self.stock_data[symbol] = data
+                    await websocket.send(json.dumps({
+                        "type": "stock_update",
+                        "symbol": symbol,
+                        "data": data
+                    }))
+            
+            logger.info(f"Client subscribed to {symbol}")
     
     async def unsubscribe(self, websocket: websockets.WebSocketServerProtocol, symbol: str):
         """Unsubscribe a client from a stock symbol.
@@ -92,9 +191,24 @@ class StockWebSocketServer:
             websocket: WebSocket connection
             symbol: Stock symbol to unsubscribe from
         """
-        if websocket in self.clients and symbol.upper() in self.clients[websocket]:
-            self.clients[websocket].remove(symbol.upper())
-            logger.info(f"Client unsubscribed from {symbol.upper()}")
+        symbol = symbol.upper()
+        
+        if websocket in self.clients and symbol in self.clients[websocket]:
+            # Remove from client's subscriptions
+            self.clients[websocket].remove(symbol)
+            
+            # Check if any other clients are still subscribed to this symbol
+            still_needed = False
+            for other_client, other_subscriptions in self.clients.items():
+                if other_client != websocket and symbol in other_subscriptions:
+                    still_needed = True
+                    break
+            
+            # If no other clients need this symbol, unsubscribe from Polygon
+            if not still_needed:
+                self.polygon_client.unsubscribe([symbol])
+            
+            logger.info(f"Client unsubscribed from {symbol}")
     
     async def handle_message(self, websocket: websockets.WebSocketServerProtocol, message: str):
         """Handle incoming messages from clients.
@@ -145,7 +259,7 @@ class StockWebSocketServer:
             await self.unregister(websocket)
     
     def fetch_stock_data(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Fetch current stock data from Polygon API.
+        """Fetch current stock data from Polygon REST API.
         
         Args:
             symbol: Stock symbol to fetch data for
@@ -175,52 +289,12 @@ class StockWebSocketServer:
             logger.error(f"Error fetching data for {symbol}: {e}")
             return None
     
-    async def broadcast_updates(self):
-        """Broadcast stock updates to subscribed clients."""
-        while self.running:
-            # Get all unique symbols that clients are subscribed to
-            all_symbols = set()
-            for subscriptions in self.clients.values():
-                all_symbols.update(subscriptions)
-            
-            # Fetch and broadcast updates for each symbol
-            for symbol in all_symbols:
-                data = self.fetch_stock_data(symbol)
-                if data:
-                    self.stock_data[symbol] = data
-                    
-                    # Broadcast to subscribed clients
-                    for websocket, subscriptions in self.clients.items():
-                        if symbol in subscriptions:
-                            try:
-                                await websocket.send(json.dumps({
-                                    "type": "stock_update",
-                                    "symbol": symbol,
-                                    "data": data
-                                }))
-                            except websockets.exceptions.ConnectionClosed:
-                                pass
-            
-            # Wait before next update
-            await asyncio.sleep(5)  # Update every 5 seconds
-    
-    def start_update_thread(self):
-        """Start the background thread for stock updates."""
-        async def update_loop():
-            await self.broadcast_updates()
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(update_loop())
-    
     async def start_server(self):
         """Start the WebSocket server."""
         self.running = True
         
-        # Start the update thread
-        self.update_thread = threading.Thread(target=self.start_update_thread)
-        self.update_thread.daemon = True
-        self.update_thread.start()
+        # Start the Polygon WebSocket client
+        self.polygon_client.start()
         
         # Start the WebSocket server
         self.server = await websockets.serve(self.handler, self.host, self.port)
@@ -232,8 +306,14 @@ class StockWebSocketServer:
     def stop(self):
         """Stop the WebSocket server."""
         self.running = False
+        
+        # Stop the Polygon WebSocket client
+        self.polygon_client.stop()
+        
+        # Close the server
         if self.server:
             self.server.close()
+            
         logger.info("WebSocket server stopped")
 
 def run_server():

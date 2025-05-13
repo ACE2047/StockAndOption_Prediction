@@ -7,12 +7,14 @@ from typing import List, Dict, Any, Optional
 # Import configuration
 try:
     from config import AppConfig
-    NEWS_API_KEY = AppConfig.NEWS_API_KEY
+    NEWS_API_KEY = "kVRrA2zVA5v5yiDAN6Dd7rUa265fn3Y8MvB5RVJs"  # Using the provided API token
+    POLYGON_API_KEY = AppConfig.POLYGON_API_KEY
 except ImportError:
     # Fallback if config is not available
     from dotenv import load_dotenv
     load_dotenv()
-    NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
+    NEWS_API_KEY = "kVRrA2zVA5v5yiDAN6Dd7rUa265fn3Y8MvB5RVJs"  # Using the provided API token
+    POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 
 class NewsAPIClient:
     """Client for fetching and categorizing news articles related to stocks."""
@@ -46,7 +48,7 @@ class NewsAPIClient:
         }
     
     def get_news_for_ticker(self, ticker: str, days: int = 7) -> List[Dict[str, Any]]:
-        """Fetch news articles related to a specific stock ticker.
+        """Fetch news articles related to a specific stock ticker using Polygon.io API.
         
         Args:
             ticker: Stock ticker symbol
@@ -59,45 +61,82 @@ class NewsAPIClient:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
-        # Format dates for API
+        # Format dates for Polygon API (YYYY-MM-DD)
         from_date = start_date.strftime('%Y-%m-%d')
         to_date = end_date.strftime('%Y-%m-%d')
         
-        # Company name lookup would be better, but for simplicity we'll use the ticker
-        query = f"{ticker} stock OR {ticker} company OR {ticker} earnings"
-        
-        url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&to={to_date}&language=en&sortBy=relevancy&apiKey={self.api_key}"
+        # Use Polygon.io API for news
+        url = f"https://api.polygon.io/v2/reference/news?ticker={ticker}&published_utc.gte={from_date}&published_utc.lte={to_date}&limit=100&apiKey={POLYGON_API_KEY}"
         
         try:
             response = requests.get(url)
             response.raise_for_status()
             
             data = response.json()
-            articles = data.get('articles', [])
+            articles = data.get('results', [])
             
             # Process and categorize articles
             processed_articles = []
             for article in articles:
-                # Categorize the article
-                article_categories = self._categorize_article(article)
-                
-                processed_articles.append({
+                # Adapt the article structure to match our expected format
+                article_data = {
                     'title': article.get('title', ''),
                     'description': article.get('description', ''),
-                    'url': article.get('url', ''),
-                    'published_at': article.get('publishedAt', ''),
-                    'source': article.get('source', {}).get('name', ''),
-                    'categories': article_categories,
-                    'ticker': ticker
-                })
+                    'url': article.get('article_url', ''),
+                    'published_at': article.get('published_utc', ''),
+                    'source': article.get('publisher', {}).get('name', ''),
+                    'ticker': ticker,
+                    'image_url': article.get('image_url', ''),
+                    'keywords': article.get('keywords', []),
+                    'author': article.get('author', '')
+                }
+                
+                # Categorize the article
+                article_categories = self._categorize_article_polygon(article)
+                article_data['categories'] = article_categories
+                
+                processed_articles.append(article_data)
             
             return processed_articles
         except Exception as e:
-            print(f"Error fetching news for {ticker}: {e}")
-            return []
+            print(f"Error fetching news for {ticker} from Polygon.io: {e}")
+            
+            # Fallback to NewsAPI if Polygon fails
+            try:
+                # Company name lookup would be better, but for simplicity we'll use the ticker
+                query = f"{ticker} stock OR {ticker} company OR {ticker} earnings"
+                
+                url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&to={to_date}&language=en&sortBy=relevancy&apiKey={self.api_key}"
+                
+                response = requests.get(url)
+                response.raise_for_status()
+                
+                data = response.json()
+                articles = data.get('articles', [])
+                
+                # Process and categorize articles
+                processed_articles = []
+                for article in articles:
+                    # Categorize the article
+                    article_categories = self._categorize_article(article)
+                    
+                    processed_articles.append({
+                        'title': article.get('title', ''),
+                        'description': article.get('description', ''),
+                        'url': article.get('url', ''),
+                        'published_at': article.get('publishedAt', ''),
+                        'source': article.get('source', {}).get('name', ''),
+                        'categories': article_categories,
+                        'ticker': ticker
+                    })
+                
+                return processed_articles
+            except Exception as e2:
+                print(f"Error fetching news from fallback NewsAPI: {e2}")
+                return []
     
     def get_market_news(self, days: int = 3) -> List[Dict[str, Any]]:
-        """Fetch general market news.
+        """Fetch general market news using Polygon.io API.
         
         Args:
             days: Number of days to look back for news
@@ -109,40 +148,77 @@ class NewsAPIClient:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
-        # Format dates for API
+        # Format dates for Polygon API (YYYY-MM-DD)
         from_date = start_date.strftime('%Y-%m-%d')
         to_date = end_date.strftime('%Y-%m-%d')
         
-        query = "stock market OR wall street OR investing OR economy"
-        
-        url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&to={to_date}&language=en&sortBy=relevancy&apiKey={self.api_key}"
+        # Use Polygon.io API for market news
+        # We'll use a broader search without specific tickers
+        url = f"https://api.polygon.io/v2/reference/news?published_utc.gte={from_date}&published_utc.lte={to_date}&limit=100&apiKey={POLYGON_API_KEY}"
         
         try:
             response = requests.get(url)
             response.raise_for_status()
             
             data = response.json()
-            articles = data.get('articles', [])
+            articles = data.get('results', [])
             
             # Process and categorize articles
             processed_articles = []
             for article in articles:
-                # Categorize the article
-                article_categories = self._categorize_article(article)
-                
-                processed_articles.append({
+                # Adapt the article structure to match our expected format
+                article_data = {
                     'title': article.get('title', ''),
                     'description': article.get('description', ''),
-                    'url': article.get('url', ''),
-                    'published_at': article.get('publishedAt', ''),
-                    'source': article.get('source', {}).get('name', ''),
-                    'categories': article_categories
-                })
+                    'url': article.get('article_url', ''),
+                    'published_at': article.get('published_utc', ''),
+                    'source': article.get('publisher', {}).get('name', ''),
+                    'image_url': article.get('image_url', ''),
+                    'keywords': article.get('keywords', []),
+                    'author': article.get('author', '')
+                }
+                
+                # Categorize the article
+                article_categories = self._categorize_article_polygon(article)
+                article_data['categories'] = article_categories
+                
+                processed_articles.append(article_data)
             
             return processed_articles
         except Exception as e:
-            print(f"Error fetching market news: {e}")
-            return []
+            print(f"Error fetching market news from Polygon.io: {e}")
+            
+            # Fallback to NewsAPI if Polygon fails
+            try:
+                query = "stock market OR wall street OR investing OR economy"
+                
+                url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&to={to_date}&language=en&sortBy=relevancy&apiKey={self.api_key}"
+                
+                response = requests.get(url)
+                response.raise_for_status()
+                
+                data = response.json()
+                articles = data.get('articles', [])
+                
+                # Process and categorize articles
+                processed_articles = []
+                for article in articles:
+                    # Categorize the article
+                    article_categories = self._categorize_article(article)
+                    
+                    processed_articles.append({
+                        'title': article.get('title', ''),
+                        'description': article.get('description', ''),
+                        'url': article.get('url', ''),
+                        'published_at': article.get('publishedAt', ''),
+                        'source': article.get('source', {}).get('name', ''),
+                        'categories': article_categories
+                    })
+                
+                return processed_articles
+            except Exception as e2:
+                print(f"Error fetching market news from fallback NewsAPI: {e2}")
+                return []
     
     def get_category_news(self, category: str, days: int = 7) -> List[Dict[str, Any]]:
         """Fetch news articles for a specific category.
@@ -199,7 +275,7 @@ class NewsAPIClient:
         """Categorize an article based on its content.
         
         Args:
-            article: News article data
+            article: News article data from NewsAPI
             
         Returns:
             List of categories the article belongs to
@@ -217,6 +293,44 @@ class NewsAPIClient:
                     article_categories.append(category)
                     break
         
+        # If no categories found, mark as 'general'
+        if not article_categories:
+            article_categories = ['general']
+        
+        return article_categories
+        
+    def _categorize_article_polygon(self, article: Dict[str, Any]) -> List[str]:
+        """Categorize an article based on its content from Polygon.io API.
+        
+        Args:
+            article: News article data from Polygon.io
+            
+        Returns:
+            List of categories the article belongs to
+        """
+        # Combine title, description and keywords for analysis
+        content = f"{article.get('title', '')} {article.get('description', '')}"
+        content = content.lower()
+        
+        # Add keywords if available
+        keywords = article.get('keywords', [])
+        if keywords:
+            content += " " + " ".join(keywords).lower()
+            
+        article_categories = []
+        
+        # Check each category
+        for category, keywords in self.categories.items():
+            for keyword in keywords:
+                if keyword.lower() in content:
+                    article_categories.append(category)
+                    break
+        
+        # If article has tickers, add them to categories
+        tickers = article.get('tickers', [])
+        if tickers:
+            article_categories.append('stocks')
+            
         # If no categories found, mark as 'general'
         if not article_categories:
             article_categories = ['general']

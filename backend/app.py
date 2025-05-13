@@ -3,7 +3,8 @@ from data_fetcher import (
     get_all_tickers, 
     get_options_chain, 
     get_stock_price, 
-    get_stock_volatility
+    get_stock_volatility,
+    get_historical_prices
 )
 from black_scholes import calculate_option_price
 from stock_predictior import predict_next_price
