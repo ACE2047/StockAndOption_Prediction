@@ -35,11 +35,37 @@ class StockPredictor:
         self.days = days
         self.prediction_days = prediction_days
         self.use_cache = use_cache
-        self.models = {}
-        self.scaler = StandardScaler()
+        self.models = {
+            'short_term': {},  # 1-5 days
+            'medium_term': {},  # 1-3 months
+            'long_term': {}    # 3-12 months
+        }
+        self.scalers = {
+            'short_term': StandardScaler(),
+            'medium_term': StandardScaler(),
+            'long_term': StandardScaler()
+        }
         self.latest_data = None
-        self.features = ['open', 'high', 'low', 'volume', 'ma_5', 'ma_20', 'rsi', 
-                         'daily_return', 'volatility', 'day_of_week', 'month']
+        
+        # Features for different time horizons
+        self.features = {
+            'short_term': [
+                'open', 'high', 'low', 'volume', 'ma_5', 'ma_20', 'rsi',
+                'daily_return', 'volatility', 'day_of_week', 'month',
+                'hourly_volatility', 'price_momentum', 'volume_momentum'
+            ],
+            'medium_term': [
+                'open', 'high', 'low', 'volume', 'ma_20', 'ma_50', 'rsi',
+                'daily_return', 'volatility', 'month', 'quarter',
+                'market_sentiment', 'industry_trend', 'earnings_growth'
+            ],
+            'long_term': [
+                'open', 'high', 'low', 'volume', 'ma_50', 'ma_200',
+                'quarterly_revenue', 'quarterly_earnings', 'pe_ratio',
+                'market_cap', 'industry_growth', 'economic_growth',
+                'interest_rates', 'inflation_rate'
+            ]
+        }
         
     def _get_model_path(self, model_name):
         """Get path for model file"""
@@ -82,18 +108,45 @@ class StockPredictor:
             logger.error(f"Error fetching data for {self.symbol}: {e}")
             return None
     
-    def _prepare_features(self, df):
-        """Prepare features for the ML models"""
-        # Technical indicators
+    def _prepare_features(self, df, horizon='short_term'):
+        """Prepare features for the ML models based on prediction horizon"""
+        # Common technical indicators
         df['ma_5'] = df['close'].rolling(window=5).mean()
         df['ma_20'] = df['close'].rolling(window=20).mean()
         df['rsi'] = self._compute_rsi(df['close'])
         df['daily_return'] = df['close'].pct_change()
         df['volatility'] = df['close'].rolling(window=14).std()
         
-        # Add day of week and month features
+        # Time-based features
         df['day_of_week'] = df.index.dayofweek
         df['month'] = df.index.month
+        df['quarter'] = df.index.quarter
+        
+        # Horizon-specific features
+        if horizon == 'short_term':
+            # Add short-term specific features
+            df['hourly_volatility'] = df['close'].rolling(window=24).std()
+            df['price_momentum'] = df['close'].pct_change(periods=5)
+            df['volume_momentum'] = df['volume'].pct_change(periods=5)
+            
+        elif horizon == 'medium_term':
+            # Add medium-term specific features
+            df['ma_50'] = df['close'].rolling(window=50).mean()
+            df['market_sentiment'] = self._get_market_sentiment()
+            df['industry_trend'] = self._get_industry_trend()
+            df['earnings_growth'] = self._get_earnings_growth()
+            
+        elif horizon == 'long_term':
+            # Add long-term specific features
+            df['ma_200'] = df['close'].rolling(window=200).mean()
+            df['quarterly_revenue'] = self._get_quarterly_revenue()
+            df['quarterly_earnings'] = self._get_quarterly_earnings()
+            df['pe_ratio'] = self._get_pe_ratio()
+            df['market_cap'] = self._get_market_cap()
+            df['industry_growth'] = self._get_industry_growth()
+            df['economic_growth'] = self._get_economic_growth()
+            df['interest_rates'] = self._get_interest_rates()
+            df['inflation_rate'] = self._get_inflation_rate()
         
         # Create target variable (next day's closing price)
         df['target'] = df['close'].shift(-1)
@@ -133,7 +186,7 @@ class StockPredictor:
         return rsi
     
     def train_models(self, df=None):
-        """Train or load various prediction models"""
+        """Train or load various prediction models for different time horizons"""
         if df is None:
             df = self.fetch_data()
             
@@ -141,33 +194,40 @@ class StockPredictor:
             logger.error("No data available for training")
             return False
             
-        # Extract features and target
-        X = df[self.features]
-        y = df['target']
-        
-        # Scale features
-        X_scaled = self.scaler.fit_transform(X)
-        
-        # Use time series cross-validation
-        tscv = TimeSeriesSplit(n_splits=5)
-        
-        # Initialize performance metrics
-        performance = {}
-        
-        # Train Linear Regression model
-        lr_model = self._train_or_load_model('linear_regression', LinearRegression, X_scaled, y, tscv)
-        
-        # Train RANSAC model
-        ransac_model = self._train_or_load_model('ransac', RANSACRegressor, X_scaled, y, tscv, 
-                                                random_state=42, min_samples=self.days//10)
-        
-        # Train Random Forest model
-        rf_model = self._train_or_load_model('random_forest', RandomForestRegressor, X_scaled, y, tscv,
-                                            n_estimators=100, random_state=42)
-        
-        # Train Gradient Boosting model
-        gb_model = self._train_or_load_model('gradient_boosting', GradientBoostingRegressor, X_scaled, y, tscv,
-                                           n_estimators=100, learning_rate=0.1, random_state=42)
+        # Train models for each horizon
+        for horizon in ['short_term', 'medium_term', 'long_term']:
+            # Prepare features for this horizon
+            horizon_df = self._prepare_features(df.copy(), horizon)
+            
+            # Extract features and target
+            X = horizon_df[self.features[horizon]]
+            y = horizon_df['target']
+            
+            # Scale features
+            X_scaled = self.scalers[horizon].fit_transform(X)
+            
+            # Use time series cross-validation
+            tscv = TimeSeriesSplit(n_splits=5)
+            
+            # Train models for this horizon
+            self.models[horizon]['linear_regression'] = self._train_or_load_model(
+                f'linear_regression_{horizon}', LinearRegression, X_scaled, y, tscv
+            )
+            
+            self.models[horizon]['ransac'] = self._train_or_load_model(
+                f'ransac_{horizon}', RANSACRegressor, X_scaled, y, tscv,
+                random_state=42, min_samples=self.days//10
+            )
+            
+            self.models[horizon]['random_forest'] = self._train_or_load_model(
+                f'random_forest_{horizon}', RandomForestRegressor, X_scaled, y, tscv,
+                n_estimators=100, random_state=42
+            )
+            
+            self.models[horizon]['gradient_boosting'] = self._train_or_load_model(
+                f'gradient_boosting_{horizon}', GradientBoostingRegressor, X_scaled, y, tscv,
+                n_estimators=100, learning_rate=0.1, random_state=42
+            )
         
         logger.info(f"All models trained for {self.symbol}")
         return True
@@ -209,8 +269,8 @@ class StockPredictor:
         return model
     
     def predict_next_days(self):
-        """Generate predictions for the next several days"""
-        if not self.models or not self.latest_data:
+        """Generate predictions for different time horizons"""
+        if not any(self.models.values()) or not self.latest_data:
             logger.error("Models not trained or no data available")
             return None
         
@@ -219,66 +279,60 @@ class StockPredictor:
             'symbol': self.symbol,
             'prediction_date': datetime.now().strftime('%Y-%m-%d'),
             'current_price': float(self.latest_data['close']),
-            'next_day_predictions': {},
-            'multi_day_predictions': {
-                'linear_regression': [],
-                'ransac': [],
-                'random_forest': [],
-                'gradient_boosting': [],
-                'ensemble': []
+            'horizons': {
+                'short_term': {'next_day': {}, 'multi_day': {}},
+                'medium_term': {'next_day': {}, 'multi_day': {}},
+                'long_term': {'next_day': {}, 'multi_day': {}}
             },
             'model_performance': {}
         }
         
-        # Prepare the latest data point
-        last_features = self.latest_data[self.features].values.reshape(1, -1)
-        last_features_scaled = self.scaler.transform(last_features)
-        
-        # Next day predictions for each model
-        for model_name, model in self.models.items():
-            try:
-                next_day_pred = float(model.predict(last_features_scaled)[0])
-                predictions['next_day_predictions'][model_name] = next_day_pred
-            except Exception as e:
-                logger.error(f"Error predicting with {model_name}: {e}")
-                predictions['next_day_predictions'][model_name] = None
-        
-        # Calculate ensemble prediction (average of all models)
-        valid_preds = [pred for pred in predictions['next_day_predictions'].values() if pred is not None]
-        if valid_preds:
-            predictions['next_day_predictions']['ensemble'] = sum(valid_preds) / len(valid_preds)
-        
-        # Multi-day predictions
-        current_data = self.latest_data.copy()
-        
-        for day in range(self.prediction_days):
-            # Make predictions with each model
-            day_predictions = {}
+        # Generate predictions for each horizon
+        for horizon in ['short_term', 'medium_term', 'long_term']:
+            # Prepare the latest data point for this horizon
+            last_features = self.latest_data[self.features[horizon]].values.reshape(1, -1)
+            last_features_scaled = self.scalers[horizon].transform(last_features)
             
-            for model_name, model in self.models.items():
+            # Next day predictions for each model in this horizon
+            for model_name, model in self.models[horizon].items():
                 try:
-                    features = current_data[self.features].values.reshape(1, -1)
-                    features_scaled = self.scaler.transform(features)
-                    pred = float(model.predict(features_scaled)[0])
-                    predictions['multi_day_predictions'][model_name].append(pred)
-                    day_predictions[model_name] = pred
+                    next_day_pred = float(model.predict(last_features_scaled)[0])
+                    predictions['horizons'][horizon]['next_day'][model_name] = next_day_pred
                 except Exception as e:
-                    logger.error(f"Error in multi-day prediction with {model_name}: {e}")
+                    logger.error(f"Error predicting with {model_name} for {horizon}: {e}")
+                    predictions['horizons'][horizon]['next_day'][model_name] = None
             
-            # Calculate ensemble prediction for this day
-            valid_day_preds = [p for p in day_predictions.values() if p is not None]
-            if valid_day_preds:
-                ensemble_pred = sum(valid_day_preds) / len(valid_day_preds)
-                predictions['multi_day_predictions']['ensemble'].append(ensemble_pred)
+            # Multi-day predictions for this horizon
+            current_data = self.latest_data.copy()
+            horizon_predictions = {model_name: [] for model_name in self.models[horizon].keys()}
             
-            # Update current data for next iteration
-            # In a real scenario, we would update all the features more accurately
-            if 'ensemble' in day_predictions:
-                current_data['close'] = ensemble_pred
-                current_data['open'] = ensemble_pred * 0.99  # Simplified
-                current_data['high'] = ensemble_pred * 1.01  # Simplified
-                current_data['low'] = ensemble_pred * 0.98   # Simplified
-                # Update other features...
+            for day in range(self.prediction_days):
+                day_predictions = {}
+                
+                for model_name, model in self.models[horizon].items():
+                    try:
+                        features = current_data[self.features[horizon]].values.reshape(1, -1)
+                        features_scaled = self.scalers[horizon].transform(features)
+                        pred = float(model.predict(features_scaled)[0])
+                        horizon_predictions[model_name].append(pred)
+                        day_predictions[model_name] = pred
+                    except Exception as e:
+                        logger.error(f"Error in multi-day prediction with {model_name} for {horizon}: {e}")
+                
+                # Calculate ensemble prediction for this day
+                valid_day_preds = [p for p in day_predictions.values() if p is not None]
+                if valid_day_preds:
+                    ensemble_pred = sum(valid_day_preds) / len(valid_day_preds)
+                    horizon_predictions['ensemble'] = horizon_predictions.get('ensemble', []) + [ensemble_pred]
+                
+                # Update current data for next iteration
+                if 'ensemble' in day_predictions:
+                    current_data['close'] = ensemble_pred
+                    current_data['open'] = ensemble_pred * 0.99
+                    current_data['high'] = ensemble_pred * 1.01
+                    current_data['low'] = ensemble_pred * 0.98
+            
+            predictions['horizons'][horizon]['multi_day'] = horizon_predictions
         
         return predictions
     

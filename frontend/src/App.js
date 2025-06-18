@@ -1,103 +1,90 @@
-import React, { useState } from 'react';
-import { Dropdowns } from './components/common';
-import { 
-  StockPrediction, 
-  OptionsAnalysis, 
-  CombinedAnalysis, 
-  NewsAnalysis 
-} from './components/analysis';
-import { 
-  BlackScholesCalculator, 
-  RealTimeData 
-} from './components/tools';
-import { Tab, Tabs, TabList, TabPanel } from 'react-tabs';
-import 'react-tabs/style/react-tabs.css';
+import React, { useState, useEffect } from 'react';
+import { Container, Grid, Paper, Typography } from '@mui/material';
+import Dropdowns from './components/Dropdowns';
+import ChatInterface from './components/ChatInterface';
+import StockPrediction from './StockPrediction';
+import OptionsAnalysis from './OptionsAnalysis';
+import axios from 'axios';
 
 function App() {
   const [selectedStock, setSelectedStock] = useState('');
   const [selectedOption, setSelectedOption] = useState('');
+  const [stockData, setStockData] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [trackedStocks, setTrackedStocks] = useState([]);
+  const [error, setError] = useState(null);
 
-  const handleStockSelect = (symbol) => {
-    setSelectedStock(symbol);
+  useEffect(() => {
+    if (selectedStock) {
+      fetchStockData(selectedStock);
+    }
+  }, [selectedStock]);
+
+  const fetchStockData = async (symbol) => {
     setLoading(true);
-    // Simulating API load time
-    setTimeout(() => setLoading(false), 1000);
-    
-    // Add to tracked stocks for real-time data if not already there
-    if (symbol && !trackedStocks.includes(symbol)) {
-      setTrackedStocks([...trackedStocks, symbol]);
+    setError(null);
+    try {
+      const response = await axios.get(`/api/stock/${symbol}`);
+      setStockData(response.data);
+    } catch (err) {
+      setError('Failed to fetch stock data');
+      console.error('Error fetching stock data:', err);
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="container mx-auto p-4">
-      <h1 className="text-3xl font-bold mb-6 text-center">
-        Stock & Option Prediction Dashboard
-      </h1>
-      
-      <div className="bg-gray-100 p-4 rounded-md mb-6">
-        <h2 className="text-xl font-semibold mb-3">Select Stock and Option</h2>
-        <Dropdowns
-          onStockSelect={handleStockSelect}
-          onOptionSelect={setSelectedOption}
-        />
-      </div>
+    <Container maxWidth="xl">
+      <Typography variant="h3" component="h1" gutterBottom align="center" sx={{ my: 4 }}>
+        Stock & Options Trading Prediction
+      </Typography>
 
-      {selectedStock && (
-        <Tabs>
-          <TabList>
-            <Tab>Stock Prediction</Tab>
-            <Tab>Options Analysis</Tab>
-            <Tab>Combined Analysis</Tab>
-            <Tab>News & Insights</Tab>
-            <Tab>Real-Time Data</Tab>
-            <Tab>Black-Scholes Calculator</Tab>
-          </TabList>
+      <Grid container spacing={3}>
+        <Grid item xs={12}>
+          <Paper sx={{ p: 2 }}>
+            <Dropdowns
+              onStockSelect={setSelectedStock}
+              onOptionSelect={setSelectedOption}
+            />
+          </Paper>
+        </Grid>
 
-          <TabPanel>
-            {loading ? (
-              <div className="text-center p-10">Loading predictions...</div>
-            ) : (
-              <StockPrediction symbol={selectedStock} />
+        {selectedStock && (
+          <>
+            <Grid item xs={12} md={8}>
+              <Paper sx={{ p: 2 }}>
+                <StockPrediction
+                  symbol={selectedStock}
+                  stockData={stockData}
+                  loading={loading}
+                  error={error}
+                />
+              </Paper>
+            </Grid>
+
+            <Grid item xs={12} md={4}>
+              <Paper sx={{ p: 2 }}>
+                <ChatInterface
+                  symbol={selectedStock}
+                  stockData={stockData}
+                />
+              </Paper>
+            </Grid>
+
+            {selectedOption && (
+              <Grid item xs={12}>
+                <Paper sx={{ p: 2 }}>
+                  <OptionsAnalysis
+                    symbol={selectedStock}
+                    selectedOption={selectedOption}
+                  />
+                </Paper>
+              </Grid>
             )}
-          </TabPanel>
-          
-          <TabPanel>
-            {loading ? (
-              <div className="text-center p-10">Loading options data...</div>
-            ) : (
-              <OptionsAnalysis symbol={selectedStock} selectedOption={selectedOption} />
-            )}
-          </TabPanel>
-          
-          <TabPanel>
-            {loading ? (
-              <div className="text-center p-10">Loading combined analysis...</div>
-            ) : (
-              <CombinedAnalysis symbol={selectedStock} />
-            )}
-          </TabPanel>
-          
-          <TabPanel>
-            {loading ? (
-              <div className="text-center p-10">Loading news and insights...</div>
-            ) : (
-              <NewsAnalysis symbol={selectedStock} />
-            )}
-          </TabPanel>
-          
-          <TabPanel>
-            <RealTimeData symbols={trackedStocks} />
-          </TabPanel>
-          
-          <TabPanel>
-            <BlackScholesCalculator currentPrice={100} />
-          </TabPanel>
-        </Tabs>
-      )}
-    </div>
+          </>
+        )}
+      </Grid>
+    </Container>
   );
 }
 

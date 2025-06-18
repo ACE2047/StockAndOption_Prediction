@@ -1,0 +1,14 @@
+def calculate_option_price(S, K, T, sigma, option_type, ...):
+    try:
+        S = float(S)
+        K = float(K)
+        T = float(T)
+        sigma = float(sigma)
+    except (ValueError, TypeError):
+        return {'status': 'error', 'message': 'Invalid input type'}
+
+    if option_type not in ['call', 'put']:
+        return {'status': 'error', 'message': 'Invalid option type'}
+    if S <= 0 or K <= 0 or T < 0 or sigma <= 0:
+        return {'status': 'error', 'message': 'Inputs must be positive and non-zero'}
+    # ... rest of your code ...

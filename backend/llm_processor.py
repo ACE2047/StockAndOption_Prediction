@@ -2,6 +2,10 @@ import os
 import json
 import requests
 from typing import List, Dict, Any, Optional
+import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # Import configuration
 try:
@@ -268,3 +272,129 @@ Provide your analysis in JSON format with the following structure:
             raise Exception(f"API call failed with status code {response.status_code}: {response.text}")
         
         return response.json()["choices"][0]["message"]["content"]
+
+class OllamaProcessor:
+    def __init__(self, host: str = "http://ollama:11434", model: str = "llama2"):
+        self.host = host
+        self.model = model
+        self.session = requests.Session()
+
+    def _generate_prompt(self, stock_data: Dict, news_data: List[Dict]) -> str:
+        """Generate a prompt for the LLM based on stock and news data."""
+        prompt = f"""Analyze the following stock and news data to provide insights:
+
+Stock Data:
+- Symbol: {stock_data.get('symbol')}
+- Current Price: ${stock_data.get('price', 0):.2f}
+- Change: {stock_data.get('change', 0):.2f}%
+- Volume: {stock_data.get('volume', 0)}
+
+Recent News:
+{self._format_news(news_data)}
+
+Please provide:
+1. A brief market sentiment analysis
+2. Key factors affecting the stock
+3. Potential risks and opportunities
+4. A concise trading recommendation
+
+Keep the response clear and actionable."""
+
+        return prompt
+
+    def _format_news(self, news_data: List[Dict]) -> str:
+        """Format news data for the prompt."""
+        formatted_news = []
+        for news in news_data[:5]:  # Limit to 5 most recent news items
+            formatted_news.append(
+                f"- {news.get('title', '')} ({news.get('published_at', '')})"
+            )
+        return "\n".join(formatted_news)
+
+    def analyze_market(self, stock_data: Dict, news_data: List[Dict]) -> Dict:
+        """Analyze market data using Ollama LLM."""
+        try:
+            prompt = self._generate_prompt(stock_data, news_data)
+            
+            response = self.session.post(
+                f"{self.host}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    "analysis": result.get("response", ""),
+                    "status": "success",
+                    "timestamp": datetime.now().isoformat()
+                }
+            else:
+                logger.error(f"Ollama API error: {response.status_code}")
+                return {
+                    "analysis": "Error analyzing market data",
+                    "status": "error",
+                    "message": f"API error: {response.status_code}"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in market analysis: {str(e)}")
+            return {
+                "analysis": "Error analyzing market data",
+                "status": "error",
+                "message": str(e)
+            }
+
+    def explain_prediction(self, prediction_data: Dict) -> Dict:
+        """Generate an explanation for a model prediction using Ollama."""
+        try:
+            prompt = f"""Explain the following stock prediction:
+
+Symbol: {prediction_data.get('symbol')}
+Current Price: ${prediction_data.get('current_price', 0):.2f}
+Predicted Price: ${prediction_data.get('predicted_price', 0):.2f}
+Confidence: {prediction_data.get('confidence', 0):.2%}
+Time Horizon: {prediction_data.get('time_horizon', '')}
+
+Please explain:
+1. The key factors influencing this prediction
+2. The confidence level and its meaning
+3. Potential risks to consider
+4. How to interpret this prediction
+
+Keep the explanation clear and accessible to non-experts."""
+
+            response = self.session.post(
+                f"{self.host}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    "explanation": result.get("response", ""),
+                    "status": "success",
+                    "timestamp": datetime.now().isoformat()
+                }
+            else:
+                logger.error(f"Ollama API error: {response.status_code}")
+                return {
+                    "explanation": "Error generating explanation",
+                    "status": "error",
+                    "message": f"API error: {response.status_code}"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in prediction explanation: {str(e)}")
+            return {
+                "explanation": "Error generating explanation",
+                "status": "error",
+                "message": str(e)
+            }

@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - OLLAMA_HOST=ollama
+      - POLYGON_API_KEY=${yY_uH1srvzHC2IOqt_WZi22S6vqKgOBo}
+      - NEWS_API_KEY=${kVRrA2zVA5v5yiDAN6Dd7rUa265fn3Y8MvB5RVJs}
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    command: serve
+
+volumes:
+  ollama_data: 

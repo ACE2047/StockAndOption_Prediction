@@ -7,7 +7,7 @@ from data_fetcher import (
     get_historical_prices
 )
 from black_scholes import calculate_option_price
-from stock_predictior import predict_next_price
+from stock_predictor import predict_next_price
 from enhanced_black_scholes import calculate_option_price as enhanced_calculate_option_price
 from enhanced_black_scholes import calculate_greeks, calculate_implied_volatility
 try:
@@ -178,9 +178,15 @@ def option_price():
 
 @app.route('/api/stock_prediction/<symbol>')
 def stock_prediction(symbol):
-    # Get prediction days from query parameter, default to 5
+    # Get prediction parameters from query parameters
     days = request.args.get('days', default=5, type=int)
-    use_enhanced = request.args.get('enhanced', default=False, type=bool)
+    horizon = request.args.get('horizon', default='short_term', type=str)
+    use_enhanced = request.args.get('enhanced', default=True, type=bool)
+    
+    # Validate horizon
+    valid_horizons = ['short_term', 'medium_term', 'long_term']
+    if horizon not in valid_horizons:
+        return jsonify({'error': f'Invalid horizon. Must be one of: {", ".join(valid_horizons)}'}), 400
     
     try:
         if use_enhanced and ENHANCED_MODELS_AVAILABLE:
@@ -188,7 +194,19 @@ def stock_prediction(symbol):
             predictor = StockPredictor(symbol, prediction_days=days)
             if predictor.train_models():
                 predictions = predictor.predict_next_days()
-                return jsonify(predictions)
+                if predictions and 'horizons' in predictions:
+                    # Return only the requested horizon's predictions
+                    horizon_predictions = {
+                        'symbol': predictions['symbol'],
+                        'prediction_date': predictions['prediction_date'],
+                        'current_price': predictions['current_price'],
+                        'next_day_predictions': predictions['horizons'][horizon]['next_day'],
+                        'multi_day_predictions': predictions['horizons'][horizon]['multi_day'],
+                        'model_performance': predictions.get('model_performance', {})
+                    }
+                    return jsonify(horizon_predictions)
+                else:
+                    return jsonify({'error': 'Failed to generate predictions'}), 500
             else:
                 # Fall back to basic predictor if enhanced fails
                 predictions = predict_next_price(symbol, days_to_predict=days)

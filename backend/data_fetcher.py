@@ -4,6 +4,13 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
+import time
+from functools import lru_cache
+import logging
+import redis
+import json
+
+logger = logging.getLogger(__name__)
 
 # Import configuration
 try:
@@ -15,104 +22,126 @@ except ImportError:
     load_dotenv()
     POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 
-def get_all_tickers():
-    """Get a list of all active stock tickers from Polygon.io.
-    
-    Returns:
-        List of ticker objects
-    """
-    url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={POLYGON_API_KEY}"
-    
-    all_tickers = []
-    next_url = url
-    
-    # Paginate through results (limited to 5 pages to avoid rate limits)
-    for _ in range(5):
-        if not next_url:
-            break
-            
-        response = requests.get(next_url)
-        if response.status_code != 200:
-            break
-            
-        data = response.json()
-        all_tickers.extend(data.get('results', []))
+class PolygonDataFetcher:
+    def __init__(self, api_key: str, cache_ttl: int = 300):
+        self.api_key = api_key
+        self.base_url = "https://api.polygon.io"
+        self.session = requests.Session()
+        self.rate_limit = 5  # requests per minute
+        self.last_request_time = 0
+        self.cache_ttl = cache_ttl
         
-        # Get next page URL if available
-        next_url = data.get('next_url')
-        if next_url:
-            next_url = f"{next_url}&apiKey={POLYGON_API_KEY}"
-    
-    return all_tickers
+        # Initialize Redis connection
+        try:
+            self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
+        except redis.ConnectionError:
+            logger.warning("Redis not available, using in-memory cache")
+            self.redis_client = None
 
-def get_options_chain(symbol: str) -> List[Dict[str, Any]]:
-    """Get options chain for a specific stock symbol.
-    
-    Args:
-        symbol: Stock ticker symbol
-        
-    Returns:
-        List of option contract objects
-    """
-    url = f"https://api.polygon.io/v3/reference/options/contracts?underlying_ticker={symbol}&limit=1000&apiKey={POLYGON_API_KEY}"
-    
-    all_options = []
-    next_url = url
-    
-    # Paginate through results (limited to 5 pages to avoid rate limits)
-    for _ in range(5):
-        if not next_url:
-            break
-            
-        response = requests.get(next_url)
-        if response.status_code != 200:
-            break
-            
-        data = response.json()
-        all_options.extend(data.get('results', []))
-        
-        # Get next page URL if available
-        next_url = data.get('next_url')
-        if next_url:
-            next_url = f"{next_url}&apiKey={POLYGON_API_KEY}"
-    
-    return all_options
+    def _rate_limit(self):
+        """Implement rate limiting."""
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < (60 / self.rate_limit):
+            time.sleep((60 / self.rate_limit) - time_since_last)
+        self.last_request_time = time.time()
 
-def get_stock_price(symbol: str) -> float:
-    """Get the current stock price for a symbol.
-    
-    Args:
-        symbol: Stock ticker symbol
+    def _get_cache_key(self, endpoint: str, params: Dict) -> str:
+        """Generate a cache key for the request."""
+        return f"polygon:{endpoint}:{json.dumps(params, sort_keys=True)}"
+
+    def _get_from_cache(self, cache_key: str) -> Optional[Dict]:
+        """Get data from cache if available."""
+        if self.redis_client:
+            try:
+                cached_data = self.redis_client.get(cache_key)
+                if cached_data:
+                    return json.loads(cached_data)
+            except Exception as e:
+                logger.error(f"Cache error: {str(e)}")
+        return None
+
+    def _set_cache(self, cache_key: str, data: Dict):
+        """Store data in cache."""
+        if self.redis_client:
+            try:
+                self.redis_client.setex(
+                    cache_key,
+                    self.cache_ttl,
+                    json.dumps(data)
+                )
+            except Exception as e:
+                logger.error(f"Cache error: {str(e)}")
+
+    def _make_request(self, endpoint: str, params: Dict) -> Dict:
+        """Make an API request with rate limiting and caching."""
+        cache_key = self._get_cache_key(endpoint, params)
+        cached_data = self._get_from_cache(cache_key)
         
-    Returns:
-        Current stock price
-    """
-    url = f"https://api.polygon.io/v2/last/trade/{symbol}?apiKey={POLYGON_API_KEY}"
-    
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
+        if cached_data:
+            return cached_data
+
+        self._rate_limit()
+        params['apiKey'] = self.api_key
+        
+        try:
+            response = self.session.get(f"{self.base_url}{endpoint}", params=params)
+            response.raise_for_status()
             data = response.json()
-            result = data.get('results', {})
-            
-            if result:
-                return float(result.get('p', 0))
-        
-        # If we couldn't get the price, try the previous close
-        url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev?apiKey={POLYGON_API_KEY}"
-        response = requests.get(url)
-        
-        if response.status_code == 200:
-            data = response.json()
-            result = data.get('results', [{}])[0]
-            
-            if result:
-                return float(result.get('c', 0))
-        
-        return 0.0
-    except Exception as e:
-        print(f"Error fetching stock price for {symbol}: {e}")
-        return 0.0
+            self._set_cache(cache_key, data)
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request error: {str(e)}")
+            raise
+
+    @lru_cache(maxsize=100)
+    def get_all_tickers(self) -> List[Dict]:
+        """Get all active stock tickers."""
+        return self._make_request("/v3/reference/tickers", {
+            "market": "stocks",
+            "active": "true",
+            "limit": 1000
+        }).get("results", [])
+
+    def get_stock_price(self, symbol: str) -> Dict:
+        """Get current stock price and details."""
+        return self._make_request(f"/v2/last/trade/{symbol}", {})
+
+    def get_options_chain(self, symbol: str) -> List[Dict]:
+        """Get options chain for a symbol."""
+        return self._make_request("/v3/reference/options/contracts", {
+            "underlying_ticker": symbol,
+            "limit": 1000
+        }).get("results", [])
+
+    def get_historical_data(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        timespan: str = "day"
+    ) -> List[Dict]:
+        """Get historical price data."""
+        return self._make_request(f"/v2/aggs/ticker/{symbol}/range/1/{timespan}/{start_date}/{end_date}", {
+            "adjusted": "true",
+            "sort": "asc",
+            "limit": 50000
+        }).get("results", [])
+
+    def get_market_status(self) -> Dict:
+        """Get current market status."""
+        return self._make_request("/v1/marketstatus/now", {})
+
+    def get_company_info(self, symbol: str) -> Dict:
+        """Get company information."""
+        return self._make_request(f"/v3/reference/tickers/{symbol}", {})
+
+    def get_news(self, symbol: str, limit: int = 10) -> List[Dict]:
+        """Get news articles for a symbol."""
+        return self._make_request("/v2/reference/news", {
+            "ticker": symbol,
+            "limit": limit
+        }).get("results", [])
 
 def get_historical_prices(symbol: str, days: int = 90) -> pd.DataFrame:
     """Get historical daily prices for a stock.
@@ -199,3 +228,15 @@ def get_stock_volatility(symbol: str, days: int = 30) -> float:
     except Exception as e:
         print(f"Error calculating volatility for {symbol}: {e}")
         return 0.2  # Default volatility
+
+def fetch_stock_data(symbol, start_date=None, end_date=None):
+    logger.info(f"Fetching stock data for {symbol} from {start_date} to {end_date}")
+    # ... existing code ...
+
+def fetch_news_data(symbol):
+    logger.info(f"Fetching news data for {symbol}")
+    # ... existing code ...
+
+def fetch_training_data(symbol, start_date=None, end_date=None):
+    logger.info(f"Fetching training data for {symbol} from {start_date} to {end_date}")
+    # ... existing code ...
